@@ -49,6 +49,19 @@ It currently starts at `15`, so the first generated invoice is
 `16/CR-INV/VI/26`. The month (`VI` = June) and year (`26` = 2026) come from the
 date you generate it.
 
+## Windows SmartScreen ("unknown publisher")
+
+The `.exe` is **unsigned** (no paid code-signing certificate), so on first run
+Windows SmartScreen shows *"Windows protected your PC"*. This is expected for
+any indie app — it is not a virus or a broken download.
+
+To run it: click **More info → Run anyway** (usually only needed once per PC).
+The build embeds version metadata so the file properties show **Chrone Studio**
+as the publisher name. Fully removing the prompt requires code signing (an EV
+certificate for instant trust, or an OV/free-OSS certificate that builds
+reputation over time). See `CARA MENJALANKAN.txt` in the release for an
+end-user guide (in Bahasa Indonesia).
+
 ## Build a Windows `.exe`
 
 You **cannot** build a Windows `.exe` from macOS (PyInstaller does not

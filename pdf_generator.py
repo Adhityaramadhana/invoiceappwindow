@@ -15,7 +15,10 @@ import re
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+from settings_manager import app_dir
+
+# Persist next to the .exe when frozen (see settings_manager.app_dir).
+BASE_DIR = app_dir()
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 # ---------------------------------------------------------------------------

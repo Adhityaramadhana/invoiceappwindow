@@ -28,6 +28,7 @@ jobs:
         run: >
           pyinstaller --noconfirm --onefile --windowed
           --name "InvoiceGenerator"
+          --version-file "version_info.txt"
           --add-data "settings.json;."
           --add-data "assets;assets"
           --collect-all babel
@@ -40,6 +41,7 @@ jobs:
           mkdir release
           copy dist\InvoiceGenerator.exe release\
           copy settings.json release\
+          copy "CARA MENJALANKAN.txt" release\
           mkdir release\assets
           mkdir release\output
           echo Put your logo here as logo.png > release\assets\README.txt

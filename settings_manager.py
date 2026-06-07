@@ -2,10 +2,22 @@
 
 import json
 import os
+import sys
 
-# settings.json lives next to this file, so the app works no matter where
-# it is launched from (and inside a PyInstaller .exe bundle too).
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def app_dir():
+    """Folder for persistent files (settings.json, output/).
+
+    When frozen by PyInstaller, base everything on the .exe location so data
+    persists next to the app — NOT on __file__, which points at a temp unpack
+    dir for a --onefile build (writes there would be lost on exit).
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = app_dir()
 SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
 
 # CR-INV is the fixed invoice code (hardcoded by design).

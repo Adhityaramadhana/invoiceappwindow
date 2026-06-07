@@ -1,0 +1,41 @@
+==========================================================
+  CHRONE — Pro Forma Invoice Generator
+  Cara menjalankan di Windows
+==========================================================
+
+1. Pastikan semua file di folder ini tetap bersama:
+   - InvoiceGenerator.exe
+   - settings.json
+   - folder assets/
+   - folder output/   (PDF hasil tersimpan di sini)
+
+2. Double-click "InvoiceGenerator.exe".
+
+----------------------------------------------------------
+KALAU MUNCUL LAYAR BIRU "Windows protected your PC"
+----------------------------------------------------------
+Ini NORMAL. Muncul karena aplikasi buatan sendiri belum
+membeli sertifikat digital (bukan virus, bukan rusak).
+
+Cara melewatinya:
+  1. Klik tulisan "More info" (Info selengkapnya).
+  2. Klik tombol "Run anyway" (Tetap jalankan).
+
+Aplikasi akan terbuka seperti biasa. Langkah ini biasanya
+hanya perlu sekali di komputer yang sama.
+
+----------------------------------------------------------
+KALAU ANTIVIRUS MEM-BLOKIR / MENGHAPUS FILE
+----------------------------------------------------------
+Beberapa antivirus terlalu sensitif terhadap aplikasi baru.
+Buka antivirus -> bagian Karantina/Quarantine -> pilih
+"Restore" / "Allow" untuk InvoiceGenerator.exe.
+
+----------------------------------------------------------
+CARA PAKAI SINGKAT
+----------------------------------------------------------
+- Tab "Create Invoice": isi tanggal, nama klien, item, DP.
+- Klik "Generate PDF" -> pilih lokasi simpan -> selesai.
+- Data perusahaan & bank bisa diubah di tab "Settings".
+- Nomor invoice keluar otomatis dan tersimpan antar pemakaian.
+==========================================================
