@@ -17,7 +17,6 @@ import re
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -119,29 +118,14 @@ def _draw_top_accent(c):
 
 
 def _draw_company_header(c, settings):
-    """Logo + company name + address, top-right. Returns bottom y of header."""
+    """Text wordmark + company name + address, top-right. Returns bottom y."""
     top = PAGE_H - 50
-    logo_path = settings.get("logo_path", "")
-    if logo_path and not os.path.isabs(logo_path):
-        logo_path = os.path.join(BASE_DIR, logo_path)
 
-    logo_bottom = top
-    if logo_path and os.path.exists(logo_path):
-        try:
-            img = ImageReader(logo_path)
-            iw, ih = img.getSize()
-            max_w, max_h = 110, 45
-            ratio = min(max_w / iw, max_h / ih)
-            w, h = iw * ratio, ih * ratio
-            c.drawImage(
-                img, RIGHT - w, top - h, width=w, height=h,
-                mask="auto", preserveAspectRatio=True,
-            )
-            logo_bottom = top - h - 8
-        except Exception:
-            logo_bottom = top
+    # Draw the "CHRONE" text wordmark (no image logo) styled to resemble the
+    # brand mark: a small angular accent + letter-spaced bold uppercase.
+    wordmark_bottom = _draw_wordmark(c, settings, top)
 
-    y = logo_bottom
+    y = wordmark_bottom - 6
     _set_fill(c, BLACK)
     c.setFont("Helvetica-Bold", 12)
     c.drawRightString(RIGHT, y - 4, settings.get("company_name", ""))
@@ -157,6 +141,47 @@ def _draw_company_header(c, settings):
         c.drawRightString(RIGHT, y, addr2)
         y -= 11
     return y
+
+
+def _draw_wordmark(c, settings, top):
+    """Draw a text-only 'CHRONE'-style wordmark in the top-right corner.
+
+    The word is the first word of the company name, uppercased (so
+    'Chrone Studio' -> 'CHRONE'), letter-spaced and bold, with a small
+    angular accent mark to mimic the brand logo. Returns the bottom y.
+    """
+    company = (settings.get("company_name", "") or "").strip()
+    word = (company.split()[0] if company else "CHRONE").upper()
+
+    size = 17
+    char_space = 1.5
+    font = "Helvetica-Bold"
+    base_w = c.stringWidth(word, font, size)
+    total_w = base_w + char_space * (len(word) - 1)
+
+    baseline = top - size
+    x = RIGHT - total_w
+
+    # small angular accent mark just left of the word (top-left corner bracket)
+    mark_h = size * 0.62
+    mark_w = 5
+    mx = x - mark_w - 4
+    my = baseline
+    _set_stroke(c, BORDER_RED)
+    c.setLineWidth(1.6)
+    c.setDash()
+    c.line(mx, my, mx, my + mark_h)            # vertical stroke
+    c.line(mx, my + mark_h, mx + mark_w, my + mark_h)  # top horizontal stroke
+
+    # the wordmark text, drawn char-by-char to apply letter spacing
+    _set_fill(c, BLACK)
+    c.setFont(font, size)
+    cx = x
+    for ch in word:
+        c.drawString(cx, baseline, ch)
+        cx += c.stringWidth(ch, font, size) + char_space
+
+    return baseline
 
 
 def _draw_title(c):
