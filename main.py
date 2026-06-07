@@ -1,12 +1,16 @@
-"""Simple Pro Forma Invoice Generator - CustomTkinter GUI.
+"""Chrone Pro Forma Invoice Generator — CustomTkinter GUI.
 
-Two tabs:
-  - Create Invoice: fill the form, click Generate PDF.
-  - Settings: company / bank / signature defaults saved to settings.json.
+Redesigned per the brand/cognitive-design blueprint:
+  - fixed header strip with the Chrone clock wordmark + segmented nav
+  - input grouped into clean cards (proximity / chunking)
+  - a sticky Live Summary panel (Subtotal / Diskon / DP / Sisa / Total) that
+    updates as you type — immediate feedback, fewer errors
+  - 3-tier button hierarchy; the orange primary is the single strong accent
 """
 
 import datetime
 import os
+import re
 import subprocess
 import sys
 import tkinter as tk
@@ -16,9 +20,32 @@ import customtkinter as ctk
 from tkcalendar import DateEntry
 
 import settings_manager as sm
-from pdf_generator import OUTPUT_DIR, generate_invoice_pdf, suggest_filename
+from pdf_generator import (
+    OUTPUT_DIR,
+    compute_totals,
+    generate_invoice_pdf,
+    suggest_filename,
+)
 
-# Indonesian month names for formatting picked dates.
+# --------------------------------------------------------------------------- #
+# Brand palette (mirror of the PDF tokens)
+# --------------------------------------------------------------------------- #
+ORANGE = "#F26A1B"
+ORANGE_DARK = "#D4570F"
+ORANGE_TINT = "#FDE7D6"
+INK = "#1E1E22"
+GRAY_700 = "#4A4A52"
+GRAY_400 = "#8A8A93"
+GRAY_200 = "#D8D8DE"
+APP_BG = "#F4F5F7"
+CARD = "#FFFFFF"
+CARD_ALT = "#FAFAFB"
+DANGER = "#D23B3B"
+OK = "#2E9E5B"
+
+DP_SEG = ["Tanpa DP", "Persentase", "Nominal"]
+DP_MAP = {"Tanpa DP": "No DP", "Persentase": "Percentage", "Nominal": "Fixed Amount"}
+
 _ID_MONTHS = [
     "", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
     "Juli", "Agustus", "September", "Oktober", "November", "Desember",
@@ -26,418 +53,649 @@ _ID_MONTHS = [
 
 
 def format_date_indonesian(d):
-    """datetime.date -> '7 Juni 2026'."""
-    return f"{d.day} {_ID_MONTHS[d.month]} {d.year}"
-
-ctk.set_appearance_mode("light")
-ctk.set_default_color_theme("blue")
-
-DP_OPTIONS = ["No DP", "Percentage", "Fixed Amount"]
+    return f"{d.day:02d} {_ID_MONTHS[d.month]} {d.year}"
 
 
+def to_number(s):
+    """Parse '1.500.000' / 'Rp 1.500.000' -> 1500000.0 (integer rupiah)."""
+    s = re.sub(r"[^0-9]", "", (s or ""))
+    return float(s) if s else 0.0
+
+
+def to_pct(s):
+    s = (s or "").strip().replace(",", ".")
+    s = re.sub(r"[^0-9.]", "", s)
+    try:
+        return max(0.0, min(100.0, float(s)))
+    except ValueError:
+        return 0.0
+
+
+def rupiah(v):
+    return "Rp " + f"{int(round(v)):,}".replace(",", ".")
+
+
+# --------------------------------------------------------------------------- #
+# Item row
+# --------------------------------------------------------------------------- #
 class ItemRow:
-    """One editable item row (Description / Qty / Amount + remove button)."""
-
-    def __init__(self, parent, on_remove):
+    def __init__(self, parent, on_remove, on_change, fonts):
+        self.on_remove = on_remove
+        self.on_change = on_change
         self.frame = ctk.CTkFrame(parent, fg_color="transparent")
         self.frame.pack(fill="x", pady=3)
-        self.on_remove = on_remove
 
-        self.description = ctk.CTkEntry(self.frame, placeholder_text="Description")
+        self.desc_var = tk.StringVar()
+        self.qty_var = tk.StringVar(value="1")
+        self.amt_var = tk.StringVar()
+
+        self.description = ctk.CTkEntry(
+            self.frame, textvariable=self.desc_var, font=fonts["body"],
+            placeholder_text="mis. 2 Hour Package + 1 Hour Free", height=34,
+        )
         self.description.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-        self.qty = ctk.CTkEntry(self.frame, width=60, placeholder_text="Qty")
-        self.qty.insert(0, "1")
+        self.qty = ctk.CTkEntry(
+            self.frame, textvariable=self.qty_var, width=52, justify="center",
+            font=fonts["body"], height=34,
+        )
         self.qty.pack(side="left", padx=(0, 6))
 
-        self.amount = ctk.CTkEntry(self.frame, width=120, placeholder_text="Amount")
+        self.amount = ctk.CTkEntry(
+            self.frame, textvariable=self.amt_var, width=120, justify="right",
+            font=fonts["body"], placeholder_text="0", height=34,
+        )
         self.amount.pack(side="left", padx=(0, 6))
 
         self.remove_btn = ctk.CTkButton(
-            self.frame, text="✕", width=32, fg_color="#c0392b",
-            hover_color="#a93226", command=self._remove,
+            self.frame, text="✕", width=30, height=30, font=fonts["body"],
+            fg_color="transparent", text_color=GRAY_400, hover_color="#F3D6D6",
+            command=lambda: self.on_remove(self),
         )
         self.remove_btn.pack(side="left")
 
-    def _remove(self):
-        self.on_remove(self)
+        self.qty_var.trace_add("write", lambda *_: self.on_change())
+        self.amt_var.trace_add("write", lambda *_: self.on_change())
+        self.amount.bind("<FocusOut>", self._fmt_amount)
+        self.amount.bind("<FocusIn>", self._raw_amount)
+
+    def _fmt_amount(self, _e=None):
+        raw = self.amt_var.get().strip()
+        if raw:
+            self.amt_var.set(f"{int(to_number(raw)):,}".replace(",", "."))
+
+    def _raw_amount(self, _e=None):
+        raw = self.amt_var.get().strip()
+        if raw:
+            self.amt_var.set(str(int(to_number(raw))))
+
+    def show_remove(self, visible):
+        if visible:
+            self.remove_btn.pack(side="left")
+        else:
+            self.remove_btn.pack_forget()
+
+    def is_blank(self):
+        return not self.desc_var.get().strip() and not self.amt_var.get().strip()
+
+    def values(self):
+        return {
+            "description": self.desc_var.get().strip(),
+            "qty": int(to_number(self.qty_var.get()) or 0),
+            "amount": to_number(self.amt_var.get()),
+        }
 
     def destroy(self):
         self.frame.destroy()
 
-    def get(self):
-        return {
-            "description": self.description.get().strip(),
-            "qty": self.qty.get().strip(),
-            "amount": self.amount.get().strip(),
-        }
 
-
+# --------------------------------------------------------------------------- #
+# Main app
+# --------------------------------------------------------------------------- #
 class InvoiceApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Pro Forma Invoice Generator")
-        self.geometry("780x760")
-        self.minsize(720, 640)
+        ctk.set_appearance_mode("light")
+        self.title("Chrone — Pro Forma Invoice")
+        self.geometry("960x740")
+        self.minsize(860, 660)
+        self.configure(fg_color=APP_BG)
 
         self.settings = sm.load_settings()
         self.item_rows = []
+        self.fonts = {
+            "title": ctk.CTkFont(size=22, weight="bold"),
+            "word": ctk.CTkFont(size=19, weight="bold"),
+            "h2": ctk.CTkFont(size=14, weight="bold"),
+            "total": ctk.CTkFont(size=19, weight="bold"),
+            "body": ctk.CTkFont(size=13),
+            "body_b": ctk.CTkFont(size=13, weight="bold"),
+            "label": ctk.CTkFont(size=11, weight="bold"),
+            "caption": ctk.CTkFont(size=11),
+        }
 
-        self.tabs = ctk.CTkTabview(self)
-        self.tabs.pack(fill="both", expand=True, padx=12, pady=12)
-        self.tabs.add("Create Invoice")
-        self.tabs.add("Settings")
+        self._build_header()
 
-        self._build_invoice_tab(self.tabs.tab("Create Invoice"))
-        self._build_settings_tab(self.tabs.tab("Settings"))
+        self.body = ctk.CTkFrame(self, fg_color="transparent")
+        self.body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
-        self._add_item_row()  # start with one row
+        self.create_page = ctk.CTkFrame(self.body, fg_color="transparent")
+        self.settings_page = ctk.CTkFrame(self.body, fg_color="transparent")
+        self._build_create_page(self.create_page)
+        self._build_settings_page(self.settings_page)
+
+        self._show_page("Create Invoice")
+        self._add_item_row()
+        self._recalc()
         self._refresh_invoice_no()
 
-    # ------------------------------------------------------------------ #
-    # Create Invoice tab
-    # ------------------------------------------------------------------ #
-    def _build_invoice_tab(self, tab):
-        scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        scroll.pack(fill="both", expand=True)
+    # ----- header / nav ----------------------------------------------------- #
+    def _build_header(self):
+        bar = ctk.CTkFrame(self, fg_color=APP_BG, height=60)
+        bar.pack(fill="x", padx=16, pady=(12, 8))
 
-        # Header section
-        header = ctk.CTkFrame(scroll)
-        header.pack(fill="x", pady=(0, 10))
-
-        row = ctk.CTkFrame(header, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=(10, 4))
-        ctk.CTkLabel(row, text="Invoice No (auto):", width=130, anchor="w").pack(side="left")
-        self.invoice_no_var = tk.StringVar(value="-")
+        left = ctk.CTkFrame(bar, fg_color="transparent")
+        left.pack(side="left")
+        ctk.CTkLabel(left, text="Chr", text_color=INK, font=self.fonts["word"]).pack(side="left")
+        clock = tk.Canvas(left, width=20, height=24, bg=APP_BG, highlightthickness=0, bd=0)
+        clock.pack(side="left", pady=(2, 0))
+        cx, cy, r = 10, 13, 7
+        clock.create_oval(cx - r, cy - r, cx + r, cy + r, outline=ORANGE, width=2)
+        clock.create_line(cx, cy, cx - 2.5, cy - 2.0, fill=INK, width=2)   # hour ~10
+        clock.create_line(cx, cy, cx + 3.5, cy - 1.5, fill=INK, width=1)   # minute ~2
+        clock.create_oval(cx - 1, cy - 1, cx + 1, cy + 1, fill=INK, outline=INK)
+        ctk.CTkLabel(left, text="ne", text_color=INK, font=self.fonts["word"]).pack(side="left")
         ctk.CTkLabel(
-            row, textvariable=self.invoice_no_var, anchor="w",
-            font=ctk.CTkFont(weight="bold"),
+            left, text="  Pro Forma Invoice", text_color=GRAY_400,
+            font=self.fonts["body"],
         ).pack(side="left")
 
-        row = ctk.CTkFrame(header, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=4)
-        ctk.CTkLabel(row, text="Date:", width=130, anchor="w").pack(side="left")
-        # Calendar popup picker — defaults to today, pick any event date freely.
+        self.nav_var = tk.StringVar(value="Create Invoice")
+        nav = ctk.CTkSegmentedButton(
+            bar, values=["Create Invoice", "Settings"], variable=self.nav_var,
+            command=self._show_page, font=self.fonts["body_b"],
+            selected_color=ORANGE, selected_hover_color=ORANGE_DARK,
+            unselected_color="#E4E6EA", text_color=INK,
+            unselected_hover_color="#D8DAE0",
+        )
+        nav.pack(side="right")
+
+    def _show_page(self, name):
+        self.nav_var.set(name)
+        self.create_page.pack_forget()
+        self.settings_page.pack_forget()
+        page = self.create_page if name == "Create Invoice" else self.settings_page
+        page.pack(fill="both", expand=True)
+
+    # ----- card factory ----------------------------------------------------- #
+    def _make_card(self, parent, title):
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12,
+                            border_width=1, border_color=GRAY_200)
+        card.pack(fill="x", pady=(0, 12))
+        if title:
+            ctk.CTkLabel(card, text=title, text_color=INK, font=self.fonts["h2"],
+                         anchor="w").pack(fill="x", padx=16, pady=(12, 0))
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=16, pady=12)
+        return inner
+
+    def _labeled_row(self, parent, label):
+        """Create a row with a left-aligned label; widgets pack into the row."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=4)
+        ctk.CTkLabel(row, text=label, text_color=GRAY_400, font=self.fonts["label"],
+                     width=130, anchor="w").pack(side="left")
+        return row
+
+    # ----- create page ------------------------------------------------------ #
+    def _build_create_page(self, page):
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_columnconfigure(1, weight=0, minsize=300)
+        page.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+
+        right = ctk.CTkFrame(page, fg_color="transparent", width=300)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.grid_propagate(False)
+
+        # --- Card: Detail Invoice ---
+        c = self._make_card(left, "Detail Invoice")
+        rid = ctk.CTkFrame(c, fg_color="transparent")
+        rid.pack(fill="x", pady=4)
+        ctk.CTkLabel(rid, text="NO. PROFORMA", text_color=GRAY_400,
+                     font=self.fonts["label"], width=130, anchor="w").pack(side="left")
+        self.invoice_no_var = tk.StringVar(value="-")
+        ctk.CTkLabel(rid, textvariable=self.invoice_no_var, text_color=INK,
+                     font=self.fonts["body_b"], anchor="w").pack(side="left")
+
+        rdate = ctk.CTkFrame(c, fg_color="transparent")
+        rdate.pack(fill="x", pady=4)
+        ctk.CTkLabel(rdate, text="TANGGAL", text_color=GRAY_400,
+                     font=self.fonts["label"], width=130, anchor="w").pack(side="left")
         self.date_picker = DateEntry(
-            row, date_pattern="dd/MM/yyyy", width=16, justify="center",
-            background="#1f6aa5", foreground="white", borderwidth=2,
-            headersbackground="#1f6aa5", headersforeground="white",
-            selectbackground="#1f6aa5", font=("Helvetica", 11),
+            rdate, date_pattern="dd/MM/yyyy", width=14, justify="center",
+            background=ORANGE, foreground="white", borderwidth=2,
+            headersbackground=ORANGE, headersforeground="white",
+            selectbackground=ORANGE, font=("Helvetica", 11),
         )
         self.date_picker.pack(side="left")
-        # Update the auto invoice-number preview when the date changes
-        # (the number's month/year follow the picked date).
-        self.date_picker.bind(
-            "<<DateEntrySelected>>", lambda _e: self._refresh_invoice_no()
-        )
-        ctk.CTkLabel(
-            row, text="  (klik untuk pilih tanggal di kalender)",
-            text_color="gray50",
-        ).pack(side="left")
+        self.date_picker.bind("<<DateEntrySelected>>", lambda _e: self._refresh_invoice_no())
 
-        row = ctk.CTkFrame(header, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=(4, 10))
-        ctk.CTkLabel(row, text="Bill to:", width=130, anchor="w").pack(side="left")
-        self.bill_to_entry = ctk.CTkEntry(row, placeholder_text="Customer name")
-        self.bill_to_entry.pack(side="left", fill="x", expand=True)
+        # optional validity / due
+        self.validity_var = tk.StringVar()
+        self.due_var = tk.StringVar()
+        vr = self._labeled_row(c, "MASA BERLAKU")
+        ctk.CTkEntry(vr, textvariable=self.validity_var, font=self.fonts["body"],
+                     height=32, placeholder_text="opsional, mis. 21 Juni 2026"
+                     ).pack(side="left", fill="x", expand=True)
+        dr = self._labeled_row(c, "JATUH TEMPO")
+        ctk.CTkEntry(dr, textvariable=self.due_var, font=self.fonts["body"],
+                     height=32, placeholder_text="opsional, mis. 10 Juni 2026"
+                     ).pack(side="left", fill="x", expand=True)
 
-        # Items section
-        items_box = ctk.CTkFrame(scroll)
-        items_box.pack(fill="x", pady=(0, 10))
-        head = ctk.CTkFrame(items_box, fg_color="transparent")
-        head.pack(fill="x", padx=10, pady=(10, 0))
-        ctk.CTkLabel(head, text="Items", font=ctk.CTkFont(size=15, weight="bold")).pack(side="left")
-        ctk.CTkButton(head, text="+ Add Item", width=100, command=self._add_item_row).pack(side="right")
+        # --- Card: Kepada Yth. ---
+        c = self._make_card(left, "Kepada Yth.")
+        self.bill_to_var = tk.StringVar()
+        self.bill_to_entry = ctk.CTkEntry(
+            c, textvariable=self.bill_to_var, font=self.fonts["body"], height=34,
+            placeholder_text="Nama klien atau perusahaan")
+        self.bill_to_entry.pack(fill="x")
+        self.bill_to_var.trace_add("write", lambda *_: self._recalc())
 
-        self.items_container = ctk.CTkFrame(items_box, fg_color="transparent")
-        self.items_container.pack(fill="x", padx=10, pady=10)
-
-        # DP section
-        dp_box = ctk.CTkFrame(scroll)
-        dp_box.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(
-            dp_box, text="Down Payment (DP)",
-            font=ctk.CTkFont(size=15, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(10, 4))
-
-        row = ctk.CTkFrame(dp_box, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=4)
-        ctk.CTkLabel(row, text="DP Type:", width=130, anchor="w").pack(side="left")
-        self.dp_type_var = tk.StringVar(value="No DP")
-        ctk.CTkOptionMenu(
-            row, values=DP_OPTIONS, variable=self.dp_type_var,
-            command=self._on_dp_type_change,
-        ).pack(side="left")
-
-        self.dp_pct_row = ctk.CTkFrame(dp_box, fg_color="transparent")
-        ctk.CTkLabel(self.dp_pct_row, text="DP Percentage:", width=130, anchor="w").pack(side="left")
-        self.dp_pct_entry = ctk.CTkEntry(self.dp_pct_row, width=120, placeholder_text="e.g. 50")
-        self.dp_pct_entry.pack(side="left")
-
-        self.dp_amt_row = ctk.CTkFrame(dp_box, fg_color="transparent")
-        ctk.CTkLabel(self.dp_amt_row, text="DP Amount:", width=130, anchor="w").pack(side="left")
-        self.dp_amt_entry = ctk.CTkEntry(self.dp_amt_row, width=120, placeholder_text="e.g. 750000")
-        self.dp_amt_entry.pack(side="left")
-        # padding row at bottom
-        ctk.CTkFrame(dp_box, fg_color="transparent", height=6).pack()
-
-        # Buttons
-        btns = ctk.CTkFrame(scroll, fg_color="transparent")
-        btns.pack(fill="x", pady=(4, 10))
+        # --- Card: Item ---
+        card = ctk.CTkFrame(left, fg_color=CARD, corner_radius=12,
+                            border_width=1, border_color=GRAY_200)
+        card.pack(fill="x", pady=(0, 12))
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(12, 0))
+        ctk.CTkLabel(head, text="Item", text_color=INK, font=self.fonts["h2"]).pack(side="left")
         ctk.CTkButton(
-            btns, text="Generate PDF", height=42,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            head, text="＋ Tambah item", width=130, height=30, font=self.fonts["body_b"],
+            fg_color="transparent", text_color=ORANGE, border_width=1,
+            border_color=ORANGE, hover_color=ORANGE_TINT, command=self._add_item_row,
+        ).pack(side="right")
+
+        caps = ctk.CTkFrame(card, fg_color="transparent")
+        caps.pack(fill="x", padx=16, pady=(8, 0))
+        ctk.CTkLabel(caps, text="DESKRIPSI", text_color=GRAY_400,
+                     font=self.fonts["label"], anchor="w").pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(caps, text="QTY", text_color=GRAY_400, font=self.fonts["label"],
+                     width=58).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(caps, text="JUMLAH", text_color=GRAY_400, font=self.fonts["label"],
+                     width=126, anchor="e").pack(side="left", padx=(0, 36))
+        self.items_container = ctk.CTkFrame(card, fg_color="transparent")
+        self.items_container.pack(fill="x", padx=16, pady=(4, 14))
+
+        # --- Card: Pembayaran & DP ---
+        c = self._make_card(left, "Pembayaran & DP")
+        drow = ctk.CTkFrame(c, fg_color="transparent")
+        drow.pack(fill="x", pady=4)
+        ctk.CTkLabel(drow, text="JENIS DP", text_color=GRAY_400,
+                     font=self.fonts["label"], width=130, anchor="w").pack(side="left")
+        self.dp_var = tk.StringVar(value="Tanpa DP")
+        ctk.CTkSegmentedButton(
+            drow, values=DP_SEG, variable=self.dp_var, command=self._on_dp_change,
+            font=self.fonts["body"], selected_color=ORANGE,
+            selected_hover_color=ORANGE_DARK, unselected_color="#E4E6EA",
+            text_color=INK,
+        ).pack(side="left")
+
+        self.dp_value_row = ctk.CTkFrame(c, fg_color="transparent")
+        ctk.CTkLabel(self.dp_value_row, text="NILAI DP", text_color=GRAY_400,
+                     font=self.fonts["label"], width=130, anchor="w").pack(side="left")
+        self.dp_value_var = tk.StringVar()
+        self.dp_value_entry = ctk.CTkEntry(
+            self.dp_value_row, textvariable=self.dp_value_var, width=140,
+            font=self.fonts["body"], height=32)
+        self.dp_value_entry.pack(side="left")
+        self.dp_suffix = ctk.CTkLabel(self.dp_value_row, text="", text_color=GRAY_400,
+                                      font=self.fonts["body"])
+        self.dp_suffix.pack(side="left", padx=8)
+        self.dp_value_var.trace_add("write", lambda *_: self._recalc())
+
+        disrow = ctk.CTkFrame(c, fg_color="transparent")
+        self.disrow = disrow
+        disrow.pack(fill="x", pady=4)
+        ctk.CTkLabel(disrow, text="DISKON", text_color=GRAY_400,
+                     font=self.fonts["label"], width=130, anchor="w").pack(side="left")
+        self.diskon_var = tk.StringVar()
+        ctk.CTkEntry(disrow, textvariable=self.diskon_var, width=140,
+                     font=self.fonts["body"], height=32, placeholder_text="0").pack(side="left")
+        ctk.CTkLabel(disrow, text="Rp", text_color=GRAY_400, font=self.fonts["body"]).pack(side="left", padx=8)
+        self.diskon_var.trace_add("write", lambda *_: self._recalc())
+
+        # --- Right column: Live Summary + actions ---
+        self._build_summary(right)
+
+    def _build_summary(self, parent):
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12,
+                            border_width=1, border_color=GRAY_200)
+        card.pack(fill="x")
+        ctk.CTkLabel(card, text="Ringkasan", text_color=INK, font=self.fonts["h2"],
+                     anchor="w").pack(fill="x", padx=16, pady=(14, 6))
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=16, pady=(0, 14))
+
+        self.sum_subtotal = tk.StringVar(value="Rp 0")
+        self.sum_diskon = tk.StringVar(value="Rp 0")
+        self.sum_dp = tk.StringVar(value="Rp 0")
+        self.sum_sisa = tk.StringVar(value="Rp 0")
+        self.sum_total = tk.StringVar(value="Rp 0")
+        self.dp_caption = tk.StringVar(value="DP")
+
+        def line(parent_, label_var_or_text, value_var, bold=False, color=GRAY_700):
+            row = ctk.CTkFrame(parent_, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            fnt = self.fonts["body_b"] if bold else self.fonts["body"]
+            if isinstance(label_var_or_text, str):
+                ctk.CTkLabel(row, text=label_var_or_text, text_color=color,
+                             font=fnt, anchor="w").pack(side="left")
+            else:
+                ctk.CTkLabel(row, textvariable=label_var_or_text, text_color=color,
+                             font=fnt, anchor="w").pack(side="left")
+            ctk.CTkLabel(row, textvariable=value_var, text_color=color, font=fnt,
+                         anchor="e").pack(side="right")
+            return row
+
+        self.row_subtotal = line(inner, "Subtotal", self.sum_subtotal)
+        self.row_diskon = line(inner, "Diskon", self.sum_diskon)
+        self.row_dp = line(inner, self.dp_caption, self.sum_dp)
+        self.row_sisa = line(inner, "Sisa Pembayaran", self.sum_sisa, bold=True, color=INK)
+
+        total_box = ctk.CTkFrame(inner, fg_color=ORANGE_TINT, corner_radius=8)
+        total_box.pack(fill="x", pady=(10, 0))
+        self.total_box = total_box
+        tb = ctk.CTkFrame(total_box, fg_color="transparent")
+        tb.pack(fill="x", padx=12, pady=10)
+        ctk.CTkLabel(tb, text="TOTAL", text_color=INK, font=self.fonts["label"]).pack(side="left")
+        ctk.CTkLabel(tb, textvariable=self.sum_total, text_color=ORANGE_DARK,
+                     font=self.fonts["total"]).pack(side="right")
+
+        # actions
+        actions = ctk.CTkFrame(parent, fg_color="transparent")
+        actions.pack(fill="x", pady=(12, 0))
+        self.generate_btn = ctk.CTkButton(
+            actions, text="Generate PDF", height=46, font=self.fonts["h2"],
+            fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="white",
             command=self._generate,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        )
+        self.generate_btn.pack(fill="x")
         ctk.CTkButton(
-            btns, text="Clear Form", height=42, fg_color="gray40",
-            hover_color="gray30", command=self._clear_form,
-        ).pack(side="left", padx=(0, 6))
+            actions, text="Buka Folder Output", height=36, font=self.fonts["body"],
+            fg_color="#E9EBEF", text_color=INK, hover_color="#DCDFE5",
+            command=self._open_output,
+        ).pack(fill="x", pady=(8, 0))
         ctk.CTkButton(
-            btns, text="Open Output Folder", height=42, fg_color="gray40",
-            hover_color="gray30", command=self._open_output,
-        ).pack(side="left")
+            actions, text="Bersihkan", height=32, font=self.fonts["body"],
+            fg_color="transparent", text_color=GRAY_400, border_width=1,
+            border_color=GRAY_200, hover_color="#ECECEF", command=self._clear_form,
+        ).pack(fill="x", pady=(8, 0))
 
+    # ----- settings page ---------------------------------------------------- #
+    def _build_settings_page(self, page):
+        scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+        self.s_entries = {}
+
+        def entry_field(parent, label, key):
+            row = self._labeled_row(parent, label)
+            e = ctk.CTkEntry(row, font=self.fonts["body"], height=32)
+            e.insert(0, str(self.settings.get(key, "")))
+            e.pack(side="left", fill="x", expand=True)
+            self.s_entries[key] = e
+            return e
+
+        c = self._make_card(scroll, "Perusahaan")
+        entry_field(c, "NAMA", "company_name")
+        entry_field(c, "TAGLINE", "company_tagline")
+        entry_field(c, "ALAMAT 1", "company_address_line_1")
+        entry_field(c, "ALAMAT 2", "company_address_line_2")
+        entry_field(c, "NPWP (OPSIONAL)", "company_npwp")
+
+        c = self._make_card(scroll, "Kontak")
+        entry_field(c, "WHATSAPP", "company_phone")
+        entry_field(c, "EMAIL", "company_email")
+        entry_field(c, "INSTAGRAM", "company_instagram")
+
+        c = self._make_card(scroll, "Bank")
+        entry_field(c, "NAMA BANK", "bank_name")
+        entry_field(c, "ATAS NAMA", "bank_account_name")
+        entry_field(c, "NO. REKENING", "bank_account_number")
+
+        c = self._make_card(scroll, "Catatan & Ketentuan")
+        ctk.CTkLabel(c, text="CATATAN / TERMS", text_color=GRAY_400,
+                     font=self.fonts["label"], anchor="w").pack(fill="x", pady=(4, 2))
+        self.statement_box = ctk.CTkTextbox(c, height=80, font=self.fonts["body"])
+        self.statement_box.pack(fill="x")
+        self.statement_box.insert("1.0", self.settings.get("official_statement", ""))
+        ctk.CTkLabel(c, text="DISCLAIMER PROFORMA", text_color=GRAY_400,
+                     font=self.fonts["label"], anchor="w").pack(fill="x", pady=(10, 2))
+        self.disclaimer_box = ctk.CTkTextbox(c, height=70, font=self.fonts["body"])
+        self.disclaimer_box.pack(fill="x")
+        self.disclaimer_box.insert("1.0", self.settings.get("proforma_disclaimer", ""))
+
+        c = self._make_card(scroll, "Tanda Tangan")
+        entry_field(c, "UCAPAN TERIMA KASIH", "thank_you_note")
+        entry_field(c, "SALAM PENUTUP", "closing_text")
+        entry_field(c, "NAMA TTD", "signature_name")
+
+        c = self._make_card(scroll, "Opsi")
+        trow = ctk.CTkFrame(c, fg_color="transparent")
+        trow.pack(fill="x", pady=4)
+        self.terbilang_switch = ctk.CTkSwitch(
+            trow, text="Tampilkan Terbilang", font=self.fonts["body"],
+            progress_color=ORANGE, text_color=INK)
+        self.terbilang_switch.pack(side="left")
+        if self.settings.get("show_terbilang", True):
+            self.terbilang_switch.select()
+
+        ctk.CTkButton(
+            scroll, text="Simpan Pengaturan", height=44, font=self.fonts["h2"],
+            fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="white",
+            command=self._save_settings,
+        ).pack(fill="x", pady=(4, 12))
+
+    # ----- item rows -------------------------------------------------------- #
     def _add_item_row(self):
-        row = ItemRow(self.items_container, self._remove_item_row)
+        row = ItemRow(self.items_container, self._remove_item_row, self._recalc, self.fonts)
         self.item_rows.append(row)
+        self._sync_remove_buttons()
+        row.description.focus_set()
+        self._recalc()
 
     def _remove_item_row(self, row):
         if len(self.item_rows) <= 1:
-            messagebox.showinfo("Info", "At least one item is required.")
             return
         row.destroy()
         self.item_rows.remove(row)
+        self._sync_remove_buttons()
+        self._recalc()
 
-    def _on_dp_type_change(self, value):
-        self.dp_pct_row.pack_forget()
-        self.dp_amt_row.pack_forget()
-        if value == "Percentage":
-            self.dp_pct_row.pack(fill="x", padx=10, pady=4)
-        elif value == "Fixed Amount":
-            self.dp_amt_row.pack(fill="x", padx=10, pady=4)
+    def _sync_remove_buttons(self):
+        only_one = len(self.item_rows) == 1
+        for r in self.item_rows:
+            r.show_remove(not only_one)
+
+    # ----- DP --------------------------------------------------------------- #
+    def _on_dp_change(self, value):
+        if value == "Tanpa DP":
+            self.dp_value_row.pack_forget()
+        else:
+            self.dp_suffix.configure(text="%" if value == "Persentase" else "Rp")
+            self.dp_value_row.pack(fill="x", pady=4, before=self.disrow)
+        self._recalc()
+
+    def _dp_internal(self):
+        return DP_MAP.get(self.dp_var.get(), "No DP")
+
+    # ----- live recompute --------------------------------------------------- #
+    def _gather_items(self):
+        return [r.values() for r in self.item_rows if not r.is_blank()]
+
+    def _current_totals(self):
+        dp_type = self._dp_internal()
+        pct = to_pct(self.dp_value_var.get()) if dp_type == "Percentage" else 0
+        amt = to_number(self.dp_value_var.get()) if dp_type == "Fixed Amount" else 0
+        return compute_totals(self._gather_items(), dp_type, pct, amt,
+                              to_number(self.diskon_var.get()))
+
+    def _recalc(self, *_):
+        t = self._current_totals()
+        self.sum_subtotal.set(rupiah(t["subtotal"]))
+        self.sum_total.set(rupiah(t["total"]))
+
+        # Re-pack conditional rows in a stable order, always above the TOTAL box.
+        for r in (self.row_diskon, self.row_dp, self.row_sisa):
+            r.pack_forget()
+        if t["diskon"] > 0:
+            self.sum_diskon.set("− " + rupiah(t["diskon"]))
+            self.row_diskon.pack(fill="x", pady=2, before=self.total_box)
+        if t["show_sisa"]:
+            self.dp_caption.set(t["dp_label"] or "DP")
+            self.sum_dp.set("− " + rupiah(t["dp_amount"]))
+            self.sum_sisa.set(rupiah(t["sisa"]))
+            self.row_dp.pack(fill="x", pady=2, before=self.total_box)
+            self.row_sisa.pack(fill="x", pady=2, before=self.total_box)
+
+        ready = bool(self.bill_to_var.get().strip()) and t["subtotal"] > 0
+        self.generate_btn.configure(
+            state="normal" if ready else "disabled",
+            fg_color=ORANGE if ready else "#D7DAE0",
+            text_color="white" if ready else GRAY_400,
+        )
+
+    def _refresh_invoice_no(self):
+        self.invoice_no_var.set(sm.peek_next_invoice_no(self.settings, self._picked_date()))
 
     def _picked_date(self):
-        """Return the date selected in the calendar (falls back to today)."""
         try:
             return self.date_picker.get_date()
         except Exception:
             return datetime.date.today()
 
-    def _refresh_invoice_no(self):
-        self.invoice_no_var.set(
-            sm.peek_next_invoice_no(self.settings, self._picked_date())
-        )
-
-    # ------------------------------------------------------------------ #
-    # Settings tab
-    # ------------------------------------------------------------------ #
-    def _build_settings_tab(self, tab):
-        scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        scroll.pack(fill="both", expand=True)
-        self.settings_entries = {}
-
-        def add_entry(parent, label, key, width=380):
-            row = ctk.CTkFrame(parent, fg_color="transparent")
-            row.pack(fill="x", pady=4)
-            ctk.CTkLabel(row, text=label, width=160, anchor="w").pack(side="left")
-            entry = ctk.CTkEntry(row, width=width)
-            entry.pack(side="left", fill="x", expand=True)
-            entry.insert(0, str(self.settings.get(key, "")))
-            self.settings_entries[key] = entry
-            return entry
-
-        # Company
-        sec = ctk.CTkFrame(scroll)
-        sec.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(sec, text="Company", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=10, pady=(10, 4))
-        inner = ctk.CTkFrame(sec, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=(0, 10))
-        add_entry(inner, "Company Name", "company_name")
-        add_entry(inner, "Address Line 1", "company_address_line_1")
-        add_entry(inner, "Address Line 2", "company_address_line_2")
-
-        logo_row = ctk.CTkFrame(inner, fg_color="transparent")
-        logo_row.pack(fill="x", pady=4)
-        ctk.CTkLabel(logo_row, text="Logo Path", width=160, anchor="w").pack(side="left")
-        self.logo_entry = ctk.CTkEntry(logo_row)
-        self.logo_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        self.logo_entry.insert(0, str(self.settings.get("logo_path", "")))
-        self.settings_entries["logo_path"] = self.logo_entry
-        ctk.CTkButton(logo_row, text="Browse", width=80, command=self._browse_logo).pack(side="left")
-
-        # Bank
-        sec = ctk.CTkFrame(scroll)
-        sec.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(sec, text="Default Bank", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=10, pady=(10, 4))
-        inner = ctk.CTkFrame(sec, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=(0, 10))
-        add_entry(inner, "Bank Name", "bank_name")
-        add_entry(inner, "Bank Account Name", "bank_account_name")
-        add_entry(inner, "Bank Account Number", "bank_account_number")
-
-        # Statement
-        sec = ctk.CTkFrame(scroll)
-        sec.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(sec, text="Official Statement", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=10, pady=(10, 4))
-        self.statement_box = ctk.CTkTextbox(sec, height=90)
-        self.statement_box.pack(fill="x", padx=10, pady=(0, 10))
-        self.statement_box.insert("1.0", self.settings.get("official_statement", ""))
-
-        # Signature
-        sec = ctk.CTkFrame(scroll)
-        sec.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(sec, text="Signature", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=10, pady=(10, 4))
-        inner = ctk.CTkFrame(sec, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=(0, 10))
-        add_entry(inner, "Closing Text", "closing_text")
-        add_entry(inner, "Signature Name", "signature_name")
-
-        ctk.CTkButton(
-            scroll, text="Save Settings", height=42,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            command=self._save_settings,
-        ).pack(fill="x", pady=(4, 10))
-
-    def _browse_logo(self):
-        path = filedialog.askopenfilename(
-            title="Select Logo",
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif"), ("All files", "*.*")],
-        )
-        if path:
-            self.logo_entry.delete(0, "end")
-            self.logo_entry.insert(0, path)
-
+    # ----- settings save ---------------------------------------------------- #
     def _save_settings(self):
-        for key, entry in self.settings_entries.items():
+        for key, entry in self.s_entries.items():
             self.settings[key] = entry.get().strip()
         self.settings["official_statement"] = self.statement_box.get("1.0", "end").strip()
+        self.settings["proforma_disclaimer"] = self.disclaimer_box.get("1.0", "end").strip()
+        self.settings["show_terbilang"] = bool(self.terbilang_switch.get())
         sm.save_settings(self.settings)
-        messagebox.showinfo("Saved", "Settings saved successfully.")
+        self._refresh_invoice_no()
+        self._toast("Pengaturan tersimpan", OK)
 
-    # ------------------------------------------------------------------ #
-    # Generate
-    # ------------------------------------------------------------------ #
-    def _collect_and_validate(self):
-        date = format_date_indonesian(self._picked_date())
-        bill_to = self.bill_to_entry.get().strip()
-        if not bill_to:
-            return None, "Bill to is required."
-
+    # ----- generate --------------------------------------------------------- #
+    def _validate(self):
+        if not self.bill_to_var.get().strip():
+            return None, "Nama klien (Kepada Yth.) wajib diisi."
         items = []
-        for i, row in enumerate(self.item_rows, start=1):
-            raw = row.get()
-            if not raw["description"]:
-                return None, f"Item {i}: description is required."
-            try:
-                qty = float(raw["qty"])
-            except ValueError:
-                return None, f"Item {i}: Qty must be a number."
-            if qty <= 0:
-                return None, f"Item {i}: Qty must be greater than 0."
-            try:
-                amount = float(raw["amount"])
-            except ValueError:
-                return None, f"Item {i}: Amount must be a number."
-            if amount <= 0:
-                return None, f"Item {i}: Amount must be greater than 0."
-            items.append({
-                "description": raw["description"],
-                "qty": int(qty) if qty == int(qty) else qty,
-                "amount": amount,
-            })
-
+        for i, r in enumerate(self.item_rows, start=1):
+            if r.is_blank():
+                continue
+            v = r.values()
+            if not v["description"]:
+                return None, f"Item {i}: deskripsi wajib diisi."
+            if v["qty"] <= 0:
+                return None, f"Item {i}: Qty harus lebih dari 0."
+            if v["amount"] <= 0:
+                return None, f"Item {i}: Jumlah harus lebih dari 0."
+            items.append(v)
         if not items:
-            return None, "At least one item is required."
+            return None, "Minimal satu item dengan jumlah harus diisi."
 
-        dp_type = self.dp_type_var.get()
-        dp_percentage = 0
-        dp_amount = 0
-        if dp_type == "Percentage":
-            try:
-                dp_percentage = float(self.dp_pct_entry.get())
-            except ValueError:
-                return None, "DP Percentage must be a number."
-            if dp_percentage <= 0:
-                return None, "DP Percentage must be greater than 0."
-        elif dp_type == "Fixed Amount":
-            try:
-                dp_amount = float(self.dp_amt_entry.get())
-            except ValueError:
-                return None, "DP Amount must be a number."
-            if dp_amount <= 0:
-                return None, "DP Amount must be greater than 0."
-
-        # bank / signature come from settings; make sure they're set
+        dp_type = self._dp_internal()
+        t = self._current_totals()
+        if dp_type == "Percentage" and to_pct(self.dp_value_var.get()) <= 0:
+            return None, "Persentase DP harus lebih dari 0."
+        if dp_type == "Fixed Amount":
+            if to_number(self.dp_value_var.get()) <= 0:
+                return None, "Nominal DP harus lebih dari 0."
+            if t["dp_amount"] > t["total"]:
+                return None, "Nominal DP melebihi total."
         if not self.settings.get("bank_account_number"):
-            return None, "Bank details are empty. Fill them in Settings first."
+            return None, "Data bank kosong. Isi dulu di tab Settings."
         if not self.settings.get("signature_name"):
-            return None, "Signature name is empty. Fill it in Settings first."
+            return None, "Nama tanda tangan kosong. Isi dulu di tab Settings."
 
         data = {
-            "date": date,
-            "bill_to": bill_to,
+            "date": format_date_indonesian(self._picked_date()),
+            "bill_to": self.bill_to_var.get().strip(),
             "items": items,
             "dp_type": dp_type,
-            "dp_percentage": dp_percentage,
-            "dp_amount": dp_amount,
+            "dp_percentage": to_pct(self.dp_value_var.get()) if dp_type == "Percentage" else 0,
+            "dp_amount": to_number(self.dp_value_var.get()) if dp_type == "Fixed Amount" else 0,
+            "diskon": to_number(self.diskon_var.get()),
+            "validity": self.validity_var.get().strip(),
+            "due_date": self.due_var.get().strip(),
         }
         return data, None
 
     def _generate(self):
-        data, error = self._collect_and_validate()
+        data, error = self._validate()
         if error:
-            messagebox.showerror("Validation Error", error)
+            messagebox.showerror("Periksa kembali", error)
             return
 
         invoice_date = self._picked_date()
-        # Reload settings so the latest saved values + counter are used.
         self.settings = sm.load_settings()
         invoice_no = sm.peek_next_invoice_no(self.settings, invoice_date)
 
-        # Ask the user where to save (pre-filled name, defaults to output/).
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         save_path = filedialog.asksaveasfilename(
-            title="Save Invoice PDF",
-            initialdir=OUTPUT_DIR,
+            title="Simpan Invoice PDF", initialdir=OUTPUT_DIR,
             initialfile=suggest_filename(invoice_no, data["bill_to"]),
             defaultextension=".pdf",
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
         )
         if not save_path:
-            return  # cancelled -> don't generate, don't advance the counter
-
-        try:
-            path = generate_invoice_pdf(
-                data, self.settings, invoice_no, output_path=save_path
-            )
-        except Exception as e:  # noqa: BLE001
-            messagebox.showerror("Error", f"Failed to generate PDF:\n{e}")
             return
 
-        # Only after success: commit the counter (number's month/year follow
-        # the picked invoice date).
+        try:
+            path = generate_invoice_pdf(data, self.settings, invoice_no, output_path=save_path)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("Gagal", f"Gagal menyimpan PDF:\n{e}")
+            return
+
         sm.commit_invoice_no(self.settings, invoice_date)
         self._refresh_invoice_no()
-
-        if messagebox.askyesno(
-            "Success",
-            f"PDF saved:\n{path}\n\nOpen its folder?",
-        ):
-            self._open_folder(os.path.dirname(path))
+        self._toast("Invoice tersimpan", OK)
+        self._open_folder(os.path.dirname(path))
 
     def _clear_form(self):
-        self.bill_to_entry.delete(0, "end")
-        self.date_picker.set_date(datetime.date.today())
-        self._refresh_invoice_no()
-        for row in list(self.item_rows):
-            row.destroy()
+        self.bill_to_var.set("")
+        self.validity_var.set("")
+        self.due_var.set("")
+        self.diskon_var.set("")
+        for r in list(self.item_rows):
+            r.destroy()
         self.item_rows.clear()
+        self.dp_var.set("Tanpa DP")
+        self._on_dp_change("Tanpa DP")
+        self.dp_value_var.set("")
+        self.date_picker.set_date(datetime.date.today())
         self._add_item_row()
-        self.dp_type_var.set("No DP")
-        self._on_dp_type_change("No DP")
-        self.dp_pct_entry.delete(0, "end")
-        self.dp_amt_entry.delete(0, "end")
+        self._refresh_invoice_no()
+        self._recalc()
+
+    # ----- misc ------------------------------------------------------------- #
+    def _toast(self, message, color=OK):
+        try:
+            tp = ctk.CTkToplevel(self)
+            tp.overrideredirect(True)
+            tp.attributes("-topmost", True)
+            self.update_idletasks()
+            x = self.winfo_rootx() + self.winfo_width() - 250
+            y = self.winfo_rooty() + self.winfo_height() - 90
+            tp.geometry(f"230x44+{x}+{y}")
+            frame = ctk.CTkFrame(tp, fg_color=color, corner_radius=8)
+            frame.pack(fill="both", expand=True)
+            ctk.CTkLabel(frame, text="✓  " + message, text_color="white",
+                         font=self.fonts["body_b"]).pack(expand=True)
+            tp.after(2400, tp.destroy)
+        except Exception:
+            pass
 
     def _open_output(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)

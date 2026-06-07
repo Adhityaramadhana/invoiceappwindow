@@ -6,19 +6,29 @@ fixed layout. Fill the form → click **Generate PDF** → the PDF is saved to t
 
 Built with **Python + CustomTkinter** (GUI) and **ReportLab** (PDF).
 
-![Pro Forma Invoice layout](assets/.gitkeep)
+![Pro Forma Invoice layout](assets/preview.png)
 
 ## Features
 
-- Two tabs: **Create Invoice** and **Settings**
+- **Create Invoice** and **Settings** pages (segmented nav)
 - **Auto-generated invoice number** (read-only), format `16/CR-INV/VI/26`
   - sequential counter (never resets) + Roman-numeral month + 2-digit year
   - counter only advances after a PDF is generated successfully
 - **Multiple items** — add/remove item rows freely
-- **DP** support: No DP / Percentage / Fixed Amount
-- Rupiah formatting (`1500000` → `Rp 1.500.000`)
-- Company / bank / signature defaults saved in `settings.json`
-- Logo support (PNG) shown top-right on the PDF
+- **Live summary** panel: Subtotal / Diskon / DP / Sisa Pembayaran / Total
+  update as you type
+- **DP** support: Tanpa DP / Persentase / Nominal, plus optional **Diskon**
+- Calendar date picker; **Save As** dialog on generate
+- Rupiah formatting (`1500000` → `Rp 1.500.000`) and **Terbilang** (amount in words)
+- Indonesian invoice conventions: Bahasa labels, **proforma disclaimer** (clearly
+  not a Faktur Pajak), bank details, contact cluster (WA / email / Instagram)
+
+## Design
+
+Redesigned on a pure-white A4 page using cognitive/visual-design rules
+(typographic hierarchy, Gestalt grouping, restraint). The Chrone brand shows as
+a single warm-orange accent (`#F26A1B`) — the clock-face **“Chrone”** wordmark
+and the Total underline — over neutral ink/gray text.
 
 ## Run from source
 
