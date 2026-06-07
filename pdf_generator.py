@@ -65,21 +65,33 @@ def _set_stroke(c, rgb):
     c.setStrokeColorRGB(*rgb)
 
 
-def generate_invoice_pdf(data, settings, invoice_no):
+def suggest_filename(invoice_no, bill_to):
+    """Build the default PDF filename, e.g. invoice_16-CR-INV-VI-26_Ka-Ara.pdf."""
+    return (
+        f"invoice_{clean_filename_part(invoice_no)}_"
+        f"{clean_filename_part(bill_to)}.pdf"
+    )
+
+
+def generate_invoice_pdf(data, settings, invoice_no, output_path=None):
     """Render the PDF and return its absolute file path.
 
     `data` keys:
         date, bill_to, items (list of {description, qty, amount}),
         dp_type ('No DP' | 'Percentage' | 'Fixed Amount'),
         dp_percentage (number), dp_amount (number)
-    """
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    filename = (
-        f"invoice_{clean_filename_part(invoice_no)}_"
-        f"{clean_filename_part(data.get('bill_to', ''))}.pdf"
-    )
-    path = os.path.join(OUTPUT_DIR, filename)
+    If `output_path` is given, the PDF is written there (used by the Save As
+    dialog); otherwise it defaults to the output/ folder.
+    """
+    if output_path:
+        path = output_path
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    else:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        path = os.path.join(
+            OUTPUT_DIR, suggest_filename(invoice_no, data.get("bill_to", ""))
+        )
 
     c = canvas.Canvas(path, pagesize=A4)
 

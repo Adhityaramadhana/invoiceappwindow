@@ -13,9 +13,21 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
+from tkcalendar import DateEntry
 
 import settings_manager as sm
-from pdf_generator import OUTPUT_DIR, generate_invoice_pdf
+from pdf_generator import OUTPUT_DIR, generate_invoice_pdf, suggest_filename
+
+# Indonesian month names for formatting picked dates.
+_ID_MONTHS = [
+    "", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+    "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+]
+
+
+def format_date_indonesian(d):
+    """datetime.date -> '7 Juni 2026'."""
+    return f"{d.day} {_ID_MONTHS[d.month]} {d.year}"
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -105,9 +117,23 @@ class InvoiceApp(ctk.CTk):
         row = ctk.CTkFrame(header, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=4)
         ctk.CTkLabel(row, text="Date:", width=130, anchor="w").pack(side="left")
-        self.date_entry = ctk.CTkEntry(row, placeholder_text="e.g. 7 Juni 2026")
-        self.date_entry.pack(side="left", fill="x", expand=True)
-        self.date_entry.insert(0, _today_indonesian())
+        # Calendar popup picker — defaults to today, pick any event date freely.
+        self.date_picker = DateEntry(
+            row, date_pattern="dd/MM/yyyy", width=16, justify="center",
+            background="#1f6aa5", foreground="white", borderwidth=2,
+            headersbackground="#1f6aa5", headersforeground="white",
+            selectbackground="#1f6aa5", font=("Helvetica", 11),
+        )
+        self.date_picker.pack(side="left")
+        # Update the auto invoice-number preview when the date changes
+        # (the number's month/year follow the picked date).
+        self.date_picker.bind(
+            "<<DateEntrySelected>>", lambda _e: self._refresh_invoice_no()
+        )
+        ctk.CTkLabel(
+            row, text="  (klik untuk pilih tanggal di kalender)",
+            text_color="gray50",
+        ).pack(side="left")
 
         row = ctk.CTkFrame(header, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(4, 10))
@@ -191,9 +217,17 @@ class InvoiceApp(ctk.CTk):
         elif value == "Fixed Amount":
             self.dp_amt_row.pack(fill="x", padx=10, pady=4)
 
+    def _picked_date(self):
+        """Return the date selected in the calendar (falls back to today)."""
+        try:
+            return self.date_picker.get_date()
+        except Exception:
+            return datetime.date.today()
+
     def _refresh_invoice_no(self):
-        today = datetime.date.today()
-        self.invoice_no_var.set(sm.peek_next_invoice_no(self.settings, today))
+        self.invoice_no_var.set(
+            sm.peek_next_invoice_no(self.settings, self._picked_date())
+        )
 
     # ------------------------------------------------------------------ #
     # Settings tab
@@ -285,10 +319,8 @@ class InvoiceApp(ctk.CTk):
     # Generate
     # ------------------------------------------------------------------ #
     def _collect_and_validate(self):
-        date = self.date_entry.get().strip()
+        date = format_date_indonesian(self._picked_date())
         bill_to = self.bill_to_entry.get().strip()
-        if not date:
-            return None, "Date is required."
         if not bill_to:
             return None, "Bill to is required."
 
@@ -358,28 +390,46 @@ class InvoiceApp(ctk.CTk):
             messagebox.showerror("Validation Error", error)
             return
 
-        today = datetime.date.today()
+        invoice_date = self._picked_date()
         # Reload settings so the latest saved values + counter are used.
         self.settings = sm.load_settings()
-        invoice_no = sm.peek_next_invoice_no(self.settings, today)
+        invoice_no = sm.peek_next_invoice_no(self.settings, invoice_date)
+
+        # Ask the user where to save (pre-filled name, defaults to output/).
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        save_path = filedialog.asksaveasfilename(
+            title="Save Invoice PDF",
+            initialdir=OUTPUT_DIR,
+            initialfile=suggest_filename(invoice_no, data["bill_to"]),
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if not save_path:
+            return  # cancelled -> don't generate, don't advance the counter
+
         try:
-            path = generate_invoice_pdf(data, self.settings, invoice_no)
+            path = generate_invoice_pdf(
+                data, self.settings, invoice_no, output_path=save_path
+            )
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Error", f"Failed to generate PDF:\n{e}")
             return
 
-        # Only after success: commit the counter.
-        sm.commit_invoice_no(self.settings, today)
+        # Only after success: commit the counter (number's month/year follow
+        # the picked invoice date).
+        sm.commit_invoice_no(self.settings, invoice_date)
         self._refresh_invoice_no()
 
         if messagebox.askyesno(
             "Success",
-            f"PDF generated:\n{os.path.basename(path)}\n\nOpen the output folder?",
+            f"PDF saved:\n{path}\n\nOpen its folder?",
         ):
-            self._open_output()
+            self._open_folder(os.path.dirname(path))
 
     def _clear_form(self):
         self.bill_to_entry.delete(0, "end")
+        self.date_picker.set_date(datetime.date.today())
+        self._refresh_invoice_no()
         for row in list(self.item_rows):
             row.destroy()
         self.item_rows.clear()
@@ -391,21 +441,15 @@ class InvoiceApp(ctk.CTk):
 
     def _open_output(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+        self._open_folder(OUTPUT_DIR)
+
+    def _open_folder(self, folder):
         if sys.platform.startswith("win"):
-            os.startfile(OUTPUT_DIR)  # noqa: SLF001
+            os.startfile(folder)  # noqa: SLF001
         elif sys.platform == "darwin":
-            subprocess.run(["open", OUTPUT_DIR], check=False)
+            subprocess.run(["open", folder], check=False)
         else:
-            subprocess.run(["xdg-open", OUTPUT_DIR], check=False)
-
-
-def _today_indonesian():
-    months = [
-        "", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-        "Juli", "Agustus", "September", "Oktober", "November", "Desember",
-    ]
-    t = datetime.date.today()
-    return f"{t.day} {months[t.month]} {t.year}"
+            subprocess.run(["xdg-open", folder], check=False)
 
 
 if __name__ == "__main__":
