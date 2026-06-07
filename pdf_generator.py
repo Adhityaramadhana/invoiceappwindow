@@ -274,11 +274,15 @@ def _draw_header(c, settings):
     """Identity block, top-right."""
     _draw_wordmark(c, settings, baseline=800)
 
-    _fill(c, INK)
-    c.setFont(FONT_B, T_H2)
-    c.drawRightString(RIGHT, 783, settings.get("company_name", ""))
-
+    # The wordmark already shows the first word ("Chrone"); print only the
+    # remainder beneath it so it reads  Chrone / Studio  (not "Chrone Studio").
+    company = (settings.get("company_name", "") or "").strip()
+    remainder = " ".join(company.split()[1:])
     y = 772
+    if remainder:
+        _fill(c, INK)
+        c.setFont(FONT_B, T_H2)
+        c.drawRightString(RIGHT, 783, remainder)
     tagline = (settings.get("company_tagline", "") or "").strip()
     if tagline:
         _fill(c, GRAY_400)
@@ -343,28 +347,25 @@ def _draw_meta(c, data, invoice_no):
     _fill(c, INK)
     c.setFont(FONT_B, T_BODY)
     c.drawString(val_l_x, 664, data.get("bill_to", ""))
-    validity = (data.get("validity", "") or "").strip()
-    if validity:
-        right_value("Masa Berlaku", validity, 664)
-
-    # Row C
-    due = (data.get("due_date", "") or "").strip()
-    if due:
-        right_value("Jatuh Tempo", due, 646)
 
     _hairline(c, LEFT, 636, RIGHT)
 
 
 def _draw_table(c, data):
-    """Low-ink item table. Returns bottom y."""
-    x_idx, x_desc, x_qty, x_amt = LEFT, LEFT + 30, 400, RIGHT
-    desc_max_w = 350 - x_desc
+    """Low-ink item table: # | Deskripsi | Qty | Harga | Jumlah. Returns bottom y."""
+    x_idx = LEFT
+    x_desc = LEFT + 22
+    x_qty = 325        # centered
+    x_harga = 450      # right-aligned (unit price)
+    x_jumlah = RIGHT   # right-aligned (qty * price)
+    desc_max_w = 300 - x_desc
 
     head_y = 612
     _label(c, x_idx, head_y, "#")
     _label(c, x_desc, head_y, "Deskripsi")
     _label(c, x_qty, head_y, "Qty", align="center")
-    _label(c, x_amt, head_y, "Jumlah", align="right")
+    _label(c, x_harga, head_y, "Harga", align="right")
+    _label(c, x_jumlah, head_y, "Jumlah", align="right")
     _hairline(c, LEFT, head_y - 8, RIGHT)
 
     y = head_y - 26
@@ -387,7 +388,8 @@ def _draw_table(c, data):
             line_total = float(qty) * float(amount)
         except (ValueError, TypeError):
             line_total = 0
-        c.drawRightString(x_amt, y, format_rupiah(line_total))
+        c.drawRightString(x_harga, y, format_rupiah(amount))
+        c.drawRightString(x_jumlah, y, format_rupiah(line_total))
 
         row_h = max(22, len(lines) * 12 + 10)
         y -= row_h

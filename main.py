@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 from tkcalendar import DateEntry
 
+import history_manager as hm
 import settings_manager as sm
 from pdf_generator import (
     OUTPUT_DIR,
@@ -95,9 +96,10 @@ class ItemRow:
         )
         self.description.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-        self.qty = ctk.CTkEntry(
-            self.frame, textvariable=self.qty_var, width=52, justify="center",
-            font=fonts["body"], height=34,
+        self.qty = ctk.CTkComboBox(
+            self.frame, variable=self.qty_var, width=72, height=34,
+            values=[str(i) for i in range(1, 21)], font=fonts["body"],
+            command=lambda _v: self.on_change(),
         )
         self.qty.pack(side="left", padx=(0, 6))
 
@@ -163,6 +165,7 @@ class InvoiceApp(ctk.CTk):
 
         self.settings = sm.load_settings()
         self.item_rows = []
+        self._editing_id = None  # id of the history record being edited, if any
         self.fonts = {
             "title": ctk.CTkFont(size=22, weight="bold"),
             "word": ctk.CTkFont(size=19, weight="bold"),
@@ -180,8 +183,10 @@ class InvoiceApp(ctk.CTk):
         self.body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
         self.create_page = ctk.CTkFrame(self.body, fg_color="transparent")
+        self.history_page = ctk.CTkFrame(self.body, fg_color="transparent")
         self.settings_page = ctk.CTkFrame(self.body, fg_color="transparent")
         self._build_create_page(self.create_page)
+        self._build_history_page(self.history_page)
         self._build_settings_page(self.settings_page)
 
         self._show_page("Create Invoice")
@@ -212,7 +217,7 @@ class InvoiceApp(ctk.CTk):
 
         self.nav_var = tk.StringVar(value="Create Invoice")
         nav = ctk.CTkSegmentedButton(
-            bar, values=["Create Invoice", "Settings"], variable=self.nav_var,
+            bar, values=["Create Invoice", "Riwayat", "Settings"], variable=self.nav_var,
             command=self._show_page, font=self.fonts["body_b"],
             selected_color=ORANGE, selected_hover_color=ORANGE_DARK,
             unselected_color="#E4E6EA", text_color=INK,
@@ -222,10 +227,16 @@ class InvoiceApp(ctk.CTk):
 
     def _show_page(self, name):
         self.nav_var.set(name)
-        self.create_page.pack_forget()
-        self.settings_page.pack_forget()
-        page = self.create_page if name == "Create Invoice" else self.settings_page
-        page.pack(fill="both", expand=True)
+        for p in (self.create_page, self.history_page, self.settings_page):
+            p.pack_forget()
+        pages = {
+            "Create Invoice": self.create_page,
+            "Riwayat": self.history_page,
+            "Settings": self.settings_page,
+        }
+        pages.get(name, self.create_page).pack(fill="both", expand=True)
+        if name == "Riwayat":
+            self._refresh_history()
 
     # ----- card factory ----------------------------------------------------- #
     def _make_card(self, parent, title):
@@ -262,13 +273,23 @@ class InvoiceApp(ctk.CTk):
 
         # --- Card: Detail Invoice ---
         c = self._make_card(left, "Detail Invoice")
+        self.edit_status = ctk.CTkLabel(
+            c, text="", text_color=ORANGE_DARK, font=self.fonts["caption"], anchor="w")
+        self.edit_status.pack(fill="x")
         rid = ctk.CTkFrame(c, fg_color="transparent")
         rid.pack(fill="x", pady=4)
         ctk.CTkLabel(rid, text="NO. PROFORMA", text_color=GRAY_400,
                      font=self.fonts["label"], width=130, anchor="w").pack(side="left")
-        self.invoice_no_var = tk.StringVar(value="-")
-        ctk.CTkLabel(rid, textvariable=self.invoice_no_var, text_color=INK,
-                     font=self.fonts["body_b"], anchor="w").pack(side="left")
+        self.invoice_no_var = tk.StringVar()
+        self._invoice_no_touched = False
+        inv_entry = ctk.CTkEntry(
+            rid, textvariable=self.invoice_no_var, font=self.fonts["body_b"],
+            height=32, placeholder_text="mis. 16/CR-INV/VI/26")
+        inv_entry.pack(side="left", fill="x", expand=True)
+        # Manual field: typing marks it "touched" so the date-based suggestion
+        # stops overwriting it.
+        inv_entry.bind("<KeyRelease>",
+                       lambda _e: setattr(self, "_invoice_no_touched", True))
 
         rdate = ctk.CTkFrame(c, fg_color="transparent")
         rdate.pack(fill="x", pady=4)
@@ -282,18 +303,6 @@ class InvoiceApp(ctk.CTk):
         )
         self.date_picker.pack(side="left")
         self.date_picker.bind("<<DateEntrySelected>>", lambda _e: self._refresh_invoice_no())
-
-        # optional validity / due
-        self.validity_var = tk.StringVar()
-        self.due_var = tk.StringVar()
-        vr = self._labeled_row(c, "MASA BERLAKU")
-        ctk.CTkEntry(vr, textvariable=self.validity_var, font=self.fonts["body"],
-                     height=32, placeholder_text="opsional, mis. 21 Juni 2026"
-                     ).pack(side="left", fill="x", expand=True)
-        dr = self._labeled_row(c, "JATUH TEMPO")
-        ctk.CTkEntry(dr, textvariable=self.due_var, font=self.fonts["body"],
-                     height=32, placeholder_text="opsional, mis. 10 Juni 2026"
-                     ).pack(side="left", fill="x", expand=True)
 
         # --- Card: Kepada Yth. ---
         c = self._make_card(left, "Kepada Yth.")
@@ -322,9 +331,9 @@ class InvoiceApp(ctk.CTk):
         ctk.CTkLabel(caps, text="DESKRIPSI", text_color=GRAY_400,
                      font=self.fonts["label"], anchor="w").pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(caps, text="QTY", text_color=GRAY_400, font=self.fonts["label"],
-                     width=58).pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(caps, text="JUMLAH", text_color=GRAY_400, font=self.fonts["label"],
-                     width=126, anchor="e").pack(side="left", padx=(0, 36))
+                     width=72).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(caps, text="HARGA", text_color=GRAY_400, font=self.fonts["label"],
+                     width=120, anchor="e").pack(side="left", padx=(0, 36))
         self.items_container = ctk.CTkFrame(card, fg_color="transparent")
         self.items_container.pack(fill="x", padx=16, pady=(4, 14))
 
@@ -497,6 +506,142 @@ class InvoiceApp(ctk.CTk):
             command=self._save_settings,
         ).pack(fill="x", pady=(4, 12))
 
+    # ----- history page ----------------------------------------------------- #
+    def _build_history_page(self, page):
+        head = ctk.CTkFrame(page, fg_color="transparent")
+        head.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(head, text="Riwayat Invoice", text_color=INK,
+                     font=self.fonts["h2"]).pack(side="left")
+        ctk.CTkButton(
+            head, text="＋ Invoice Baru", width=140, height=32,
+            font=self.fonts["body_b"], fg_color=ORANGE, hover_color=ORANGE_DARK,
+            text_color="white", command=self._new_invoice,
+        ).pack(side="right")
+        self.history_scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        self.history_scroll.pack(fill="both", expand=True)
+
+    def _refresh_history(self):
+        for w in self.history_scroll.winfo_children():
+            w.destroy()
+        records = hm.load_invoices()
+        if not records:
+            ctk.CTkLabel(
+                self.history_scroll, text="Belum ada invoice tersimpan.\n"
+                "Invoice otomatis tersimpan di sini setiap kali kamu Generate PDF.",
+                text_color=GRAY_400, font=self.fonts["body"], justify="left",
+            ).pack(anchor="w", pady=30, padx=4)
+            return
+        for rec in records:
+            self._history_card(rec)
+
+    def _history_card(self, rec):
+        card = ctk.CTkFrame(self.history_scroll, fg_color=CARD, corner_radius=10,
+                            border_width=1, border_color=GRAY_200)
+        card.pack(fill="x", pady=6)
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=10)
+
+        info = ctk.CTkFrame(inner, fg_color="transparent")
+        info.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(info, text=rec.get("invoice_no", "-"), text_color=INK,
+                     font=self.fonts["body_b"], anchor="w").pack(fill="x")
+        sub = f"{rec.get('date', '')}   ·   {rec.get('bill_to', '')}"
+        ctk.CTkLabel(info, text=sub, text_color=GRAY_400,
+                     font=self.fonts["caption"], anchor="w").pack(fill="x")
+        ctk.CTkLabel(info, text=rupiah(rec.get("total", 0)), text_color=ORANGE_DARK,
+                     font=self.fonts["body_b"], anchor="w").pack(fill="x", pady=(2, 0))
+
+        btns = ctk.CTkFrame(inner, fg_color="transparent")
+        btns.pack(side="right")
+        ctk.CTkButton(btns, text="Edit", width=60, height=30, font=self.fonts["body_b"],
+                      fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="white",
+                      command=lambda r=rec: self._load_invoice(r)).pack(side="left", padx=4)
+        if rec.get("pdf_path") and os.path.exists(rec["pdf_path"]):
+            ctk.CTkButton(btns, text="Buka PDF", width=84, height=30,
+                          font=self.fonts["body"], fg_color="#E9EBEF", text_color=INK,
+                          hover_color="#DCDFE5",
+                          command=lambda p=rec["pdf_path"]: self._open_file(p)
+                          ).pack(side="left", padx=4)
+        ctk.CTkButton(btns, text="Hapus", width=60, height=30, font=self.fonts["body"],
+                      fg_color="transparent", text_color=DANGER, border_width=1,
+                      border_color=GRAY_200, hover_color="#F3D6D6",
+                      command=lambda r=rec: self._delete_invoice(r)).pack(side="left", padx=4)
+
+    def _load_invoice(self, rec):
+        self._invoice_no_touched = True
+        self.invoice_no_var.set(rec.get("invoice_no", ""))
+        try:
+            self.date_picker.set_date(datetime.date.fromisoformat(rec.get("date_iso", "")))
+        except (ValueError, TypeError):
+            pass
+        self.bill_to_var.set(rec.get("bill_to", ""))
+
+        for r in list(self.item_rows):
+            r.destroy()
+        self.item_rows.clear()
+        for it in (rec.get("items") or [{}]):
+            self._add_item_row()
+            row = self.item_rows[-1]
+            row.desc_var.set(it.get("description", ""))
+            row.qty_var.set(str(it.get("qty", 1)))
+            amt = it.get("amount", 0)
+            row.amt_var.set(str(int(amt)) if amt else "")
+            row._fmt_amount()
+        self._sync_remove_buttons()
+
+        dp_type = rec.get("dp_type", "No DP")
+        seg = {"No DP": "Tanpa DP", "Percentage": "Persentase",
+               "Fixed Amount": "Nominal"}.get(dp_type, "Tanpa DP")
+        self.dp_var.set(seg)
+        self._on_dp_change(seg)
+        if dp_type == "Percentage":
+            pct = rec.get("dp_percentage", 0) or 0
+            self.dp_value_var.set(str(int(pct) if float(pct) == int(pct) else pct))
+        elif dp_type == "Fixed Amount":
+            self.dp_value_var.set(str(int(rec.get("dp_amount", 0) or 0)))
+        else:
+            self.dp_value_var.set("")
+
+        dk = rec.get("diskon", 0)
+        self.diskon_var.set(str(int(dk)) if dk else "")
+
+        self._editing_id = rec.get("id")
+        self._update_edit_banner()
+        self._recalc()
+        self._show_page("Create Invoice")
+        self._toast("Invoice dibuka untuk diedit", OK)
+
+    def _delete_invoice(self, rec):
+        if not messagebox.askyesno("Hapus Invoice",
+                                   f"Hapus invoice {rec.get('invoice_no', '')} dari riwayat?"):
+            return
+        hm.delete_invoice(rec.get("id"))
+        if self._editing_id == rec.get("id"):
+            self._editing_id = None
+            self._update_edit_banner()
+        self._refresh_history()
+        self._toast("Invoice dihapus", OK)
+
+    def _new_invoice(self):
+        self._editing_id = None
+        self._clear_form()
+        self._show_page("Create Invoice")
+
+    def _update_edit_banner(self):
+        if getattr(self, "_editing_id", None):
+            self.edit_status.configure(
+                text="✎ Sedang mengedit invoice tersimpan — klik “Bersihkan” untuk invoice baru.")
+        else:
+            self.edit_status.configure(text="")
+
+    def _open_file(self, path):
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # noqa: SLF001
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=False)
+        else:
+            subprocess.run(["xdg-open", path], check=False)
+
     # ----- item rows -------------------------------------------------------- #
     def _add_item_row(self):
         row = ItemRow(self.items_container, self._remove_item_row, self._recalc, self.fonts)
@@ -567,6 +712,10 @@ class InvoiceApp(ctk.CTk):
         )
 
     def _refresh_invoice_no(self):
+        # No. Proforma is manual now: only prefill a date-based suggestion while
+        # the user hasn't typed their own number yet.
+        if getattr(self, "_invoice_no_touched", False):
+            return
         self.invoice_no_var.set(sm.peek_next_invoice_no(self.settings, self._picked_date()))
 
     def _picked_date(self):
@@ -619,7 +768,11 @@ class InvoiceApp(ctk.CTk):
         if not self.settings.get("signature_name"):
             return None, "Nama tanda tangan kosong. Isi dulu di tab Settings."
 
+        if not self.invoice_no_var.get().strip():
+            return None, "No. Proforma wajib diisi."
+
         data = {
+            "invoice_no": self.invoice_no_var.get().strip(),
             "date": format_date_indonesian(self._picked_date()),
             "bill_to": self.bill_to_var.get().strip(),
             "items": items,
@@ -627,8 +780,6 @@ class InvoiceApp(ctk.CTk):
             "dp_percentage": to_pct(self.dp_value_var.get()) if dp_type == "Percentage" else 0,
             "dp_amount": to_number(self.dp_value_var.get()) if dp_type == "Fixed Amount" else 0,
             "diskon": to_number(self.diskon_var.get()),
-            "validity": self.validity_var.get().strip(),
-            "due_date": self.due_var.get().strip(),
         }
         return data, None
 
@@ -638,9 +789,8 @@ class InvoiceApp(ctk.CTk):
             messagebox.showerror("Periksa kembali", error)
             return
 
-        invoice_date = self._picked_date()
         self.settings = sm.load_settings()
-        invoice_no = sm.peek_next_invoice_no(self.settings, invoice_date)
+        invoice_no = data["invoice_no"]  # manual, entered by the user
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         save_path = filedialog.asksaveasfilename(
@@ -658,15 +808,32 @@ class InvoiceApp(ctk.CTk):
             messagebox.showerror("Gagal", f"Gagal menyimpan PDF:\n{e}")
             return
 
-        sm.commit_invoice_no(self.settings, invoice_date)
-        self._refresh_invoice_no()
+        self._save_to_history(data, path)
         self._toast("Invoice tersimpan", OK)
         self._open_folder(os.path.dirname(path))
 
+    def _save_to_history(self, data, pdf_path):
+        record = {
+            "id": self._editing_id or datetime.datetime.now().strftime("%Y%m%d%H%M%S%f"),
+            "invoice_no": data["invoice_no"],
+            "date": data["date"],
+            "date_iso": self._picked_date().isoformat(),
+            "bill_to": data["bill_to"],
+            "items": data["items"],
+            "dp_type": data["dp_type"],
+            "dp_percentage": data["dp_percentage"],
+            "dp_amount": data["dp_amount"],
+            "diskon": data["diskon"],
+            "total": self._current_totals()["total"],
+            "pdf_path": pdf_path,
+            "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        hm.upsert_invoice(record)
+        self._editing_id = record["id"]
+        self._update_edit_banner()
+
     def _clear_form(self):
         self.bill_to_var.set("")
-        self.validity_var.set("")
-        self.due_var.set("")
         self.diskon_var.set("")
         for r in list(self.item_rows):
             r.destroy()
@@ -675,6 +842,9 @@ class InvoiceApp(ctk.CTk):
         self._on_dp_change("Tanpa DP")
         self.dp_value_var.set("")
         self.date_picker.set_date(datetime.date.today())
+        self._invoice_no_touched = False
+        self._editing_id = None
+        self._update_edit_banner()
         self._add_item_row()
         self._refresh_invoice_no()
         self._recalc()
