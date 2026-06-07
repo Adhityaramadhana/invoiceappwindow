@@ -19,20 +19,35 @@ _ROMAN_MONTHS = [
 
 DEFAULT_SETTINGS = {
     "company_name": "Chrone Studio",
+    "company_tagline": "Photo • Booth • Event",
     "company_address_line_1": "JL Rajawali no.16 Jatimakmur Pondok",
     "company_address_line_2": "Gede Belasi Kode Pos 17413",
+    "company_phone": "",
+    "company_email": "",
+    "company_instagram": "",
+    "company_npwp": "",
     "logo_path": "assets/logo.png",
+    "use_logo_image": False,
     "bank_name": "BCA",
     "bank_account_name": "MUHAMMAD ZIDANE P.",
     "bank_account_number": "6872489629",
     "official_statement": (
-        "Payment Methods:\n"
-        "1. 50% Sisa pembayaran wajib dilunasi paling lambat pada H+3 acara\n"
+        "1. 50% sisa pembayaran wajib dilunasi paling lambat pada H+3 acara.\n"
         "2. DP yang telah dibayarkan dapat dikembalikan apabila pembatalan "
         "dilakukan maksimal H-7 sebelum acara."
     ),
-    "closing_text": "Hormat Saya",
+    # Mandatory proforma disclaimer — keeps the document from being mistaken
+    # for a Faktur Pajak (tax invoice). Printed verbatim in the footer.
+    "proforma_disclaimer": (
+        "Dokumen ini merupakan Proforma Invoice (penawaran harga / estimasi "
+        "biaya) dan BUKAN Faktur Pajak. Harga sudah final dan tidak dikenakan "
+        "PPN. Dokumen ini tidak mengikat secara hukum dan bukan bukti pembayaran."
+    ),
+    "thank_you_note": "Terima kasih atas kepercayaan Anda.",
+    "closing_text": "Hormat kami,",
     "signature_name": "M ZIDANE PUSOKO",
+    "show_terbilang": True,
+    "terbilang_target": "total",
     # Last invoice number that was successfully generated. Next one is +1.
     # Starts at 15 so the first generated invoice is 16/CR-INV/...
     "last_invoice_number": 15,
