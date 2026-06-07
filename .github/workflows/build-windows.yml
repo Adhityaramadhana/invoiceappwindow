@@ -30,6 +30,9 @@ jobs:
           --name "InvoiceGenerator"
           --add-data "settings.json;."
           --add-data "assets;assets"
+          --collect-all babel
+          --collect-all tkcalendar
+          --hidden-import babel.numbers
           main.py
 
       - name: Stage release files
